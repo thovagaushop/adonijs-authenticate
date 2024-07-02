@@ -1,6 +1,7 @@
 import { DateTime } from 'luxon'
 import { BaseModel, column } from '@adonisjs/lucid/orm'
-import { JwtAccessTokenProvider } from '#providers/jwt_access_token_provider'
+import { JwtAccessTokenProvider, JwtSecret } from '#providers/jwt_access_token_provider'
+import parseDuration from 'parse-duration'
 
 export default class User extends BaseModel {
   @column({ isPrimary: true })
@@ -22,8 +23,11 @@ export default class User extends BaseModel {
   declare updatedAt: DateTime | null
 
   static accessTokens = JwtAccessTokenProvider.forModel(User, {
-    expiresInMilis: 100000,
-    key: 'secret',
+    expiresInMillis: parseDuration('1 day')!,
+    key: new JwtSecret('BjBZ-s9JFJTBwUsOo1Ml-fzkCqja_byX'),
     primaryKey: 'id',
+    algorithm: 'HS256',
+    audience: 'https://client.example.com',
+    issuer: 'https://server.example.com',
   })
 }

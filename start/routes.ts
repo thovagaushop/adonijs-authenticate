@@ -35,6 +35,7 @@ router
       .get('', async (ctx) => {
         const user = ctx.auth.user!
         console.log(user)
+        return user
       })
       .use(middleware.auth({ guards: ['api'] }))
   })

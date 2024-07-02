@@ -1,13 +1,32 @@
-import { AccessTokensProviderContract } from '@adonisjs/auth/types/access_tokens'
 import { LucidModel } from '@adonisjs/lucid/types/model'
-import { JwtAccessTokenProviderOptions } from '../types/auth.js'
-import { Algorithm } from 'jsonwebtoken'
-import jwt from 'jsonwebtoken'
-import { RuntimeException } from '@adonisjs/core/exceptions'
+import { AccessTokensProviderContract } from '@adonisjs/auth/types/access_tokens'
 import { AccessToken } from '@adonisjs/auth/access_tokens'
-import { DateTime } from 'luxon'
 import { Secret } from '@adonisjs/core/helpers'
+import { RuntimeException } from '@adonisjs/core/exceptions'
+import jwt, { Algorithm } from 'jsonwebtoken'
 import lodash from 'lodash'
+import { DateTime } from 'luxon'
+import { JwtAccessTokenProviderOptions, JwtKey } from '../types/auth.js'
+
+export class JwtKeyPair implements JwtKey {
+  public readonly verificationKey: string
+  public readonly secret: string
+
+  constructor(publicKey: string, privateKey: string) {
+    this.verificationKey = publicKey
+    this.secret = privateKey
+  }
+}
+
+export class JwtSecret implements JwtKey {
+  public readonly verificationKey: string
+  public readonly secret: string
+
+  constructor(secret: string) {
+    this.verificationKey = secret
+    this.secret = secret
+  }
+}
 
 export class JwtAccessTokenProvider<TokenableModel extends LucidModel>
   implements AccessTokensProviderContract<TokenableModel>
@@ -19,13 +38,108 @@ export class JwtAccessTokenProvider<TokenableModel extends LucidModel>
     return new JwtAccessTokenProvider<TokenableModel>({ tokenableModel: model, ...options })
   }
 
-  protected algorithm: Algorithm
+  private algorithm: Algorithm
+
+  private getExtraPayload: (user: InstanceType<TokenableModel>) => Record<string, any>
 
   constructor(protected options: JwtAccessTokenProviderOptions<TokenableModel>) {
-    this.algorithm = options.algorithm || 'HS256'
+    this.algorithm = options.algorithm ?? 'HS256'
+    this.getExtraPayload = options.extraPayload ?? (() => ({}))
   }
 
-  #ensureIsPersisted(user: InstanceType<TokenableModel>) {
+  async create(
+    user: InstanceType<TokenableModel>,
+    abilities?: string[],
+    options?: {
+      iat?: DateTime
+      expiresIn?: number
+    }
+  ): Promise<AccessToken> {
+    this.ensureIsPersisted(user)
+
+    const expiresInMillis = options?.expiresIn ?? this.options.expiresInMillis
+
+    const userId = user.$primaryKeyValue!
+
+    const iat = options?.iat ?? DateTime.now()
+    const exp = iat.plus({ milliseconds: expiresInMillis })
+
+    const jwtToken = jwt.sign(
+      lodash.merge(
+        {
+          [this.options.primaryKey]: userId,
+        },
+        this.getExtraPayload(user),
+        {
+          exp: lodash.floor(exp.toSeconds()),
+        }
+      ),
+      this.options.key.secret,
+      { algorithm: this.algorithm, issuer: this.options.issuer, audience: this.options.audience }
+    )
+
+    return lodash.tap(
+      new AccessToken({
+        identifier: userId,
+        tokenableId: userId,
+        type: 'jwt',
+        name: 'jwt',
+        hash: '',
+        abilities: abilities ?? [],
+        createdAt: iat.toJSDate(),
+        updatedAt: iat.toJSDate(),
+        lastUsedAt: iat.toJSDate(),
+        expiresAt: exp.toJSDate(),
+      }),
+      (accessToken) => {
+        accessToken.value = new Secret(jwtToken)
+      }
+    )
+  }
+
+  async verify(tokenValue: Secret<string>): Promise<AccessToken | null> {
+    const jwtToken = tokenValue.release()
+
+    if (!jwtToken) {
+      return null
+    }
+
+    try {
+      const payload = jwt.verify(jwtToken, this.options.key.verificationKey, {
+        algorithms: [this.algorithm],
+        issuer: this.options.issuer,
+        audience: this.options.audience,
+      }) as Record<string, any>
+
+      const userId = payload[this.options.primaryKey]
+
+      if (lodash.isNil(userId)) {
+        return null
+      }
+
+      return lodash.tap(
+        new AccessToken({
+          identifier: userId,
+          tokenableId: userId,
+          type: 'jwt',
+          name: 'jwt',
+          hash: '',
+          abilities: [],
+          createdAt: DateTime.now().toJSDate(),
+          updatedAt: DateTime.now().toJSDate(),
+          lastUsedAt: DateTime.now().toJSDate(),
+          expiresAt: DateTime.fromMillis(payload.exp * 1000).toJSDate(),
+        }),
+        (accessToken) => {
+          accessToken.value = tokenValue
+        }
+      )
+    } catch {
+      return null
+    }
+  }
+
+  ensureIsPersisted(user: InstanceType<TokenableModel>) {
     const model = this.options.tokenableModel
     if (user instanceof model === false) {
       throw new RuntimeException(
@@ -37,97 +151,6 @@ export class JwtAccessTokenProvider<TokenableModel extends LucidModel>
       throw new RuntimeException(
         `Cannot use "${model.name}" model for managing access tokens. The value of column "${model.primaryKey}" is undefined or null`
       )
-    }
-  }
-
-  isObject(value: unknown) {
-    return value !== null && typeof value === 'object' && !Array.isArray(value)
-  }
-
-  protected async getDb() {
-    const model = this.options.tokenableModel
-    return model.$adapter.query(model).client
-  }
-
-  async create(
-    user: InstanceType<TokenableModel>,
-    abilities?: string[],
-    options?: {
-      iat?: DateTime
-      expiresIn?: number
-    }
-  ) {
-    this.#ensureIsPersisted(user)
-
-    const userId = user.$primaryKeyValue
-
-    const expiresIn = options?.expiresIn || this.options.expiresInMilis
-
-    const iat = options?.iat || DateTime.now()
-    console.log(iat)
-
-    const exp = iat.plus(expiresIn)
-
-    const jwtToken = jwt.sign(
-      {
-        [this.options.primaryKey]: userId,
-        iat: exp.toMillis(),
-      },
-      this.options.key,
-      {
-        algorithm: this.algorithm,
-      }
-    )
-
-    return lodash.tap(
-      new AccessToken({
-        identifier: userId!,
-        tokenableId: userId!,
-        expiresAt: exp.toJSDate(),
-        createdAt: DateTime.now().toJSDate(),
-        updatedAt: DateTime.now().toJSDate(),
-        lastUsedAt: DateTime.now().toJSDate(),
-        abilities: abilities ?? [],
-        type: 'jwt',
-        name: 'jwt',
-        hash: '',
-      }),
-      (accessToken) => (accessToken.value = new Secret(jwtToken))
-    )
-  }
-
-  async verify(tokenValue: Secret<string>) {
-    const jwtToken = tokenValue.release()
-    try {
-      const payload = jwt.verify(jwtToken, this.options.key, {
-        algorithms: [this.algorithm],
-      }) as Record<string, any>
-
-      const userId = payload[this.options.primaryKey]
-
-      console.log({ userId })
-
-      if (!userId) {
-        return null
-      }
-
-      return lodash.tap(
-        new AccessToken({
-          identifier: userId!,
-          tokenableId: userId!,
-          expiresAt: DateTime.now().plus(1000).toJSDate(),
-          createdAt: DateTime.now().toJSDate(),
-          updatedAt: DateTime.now().toJSDate(),
-          lastUsedAt: DateTime.now().toJSDate(),
-          abilities: [],
-          type: 'jwt',
-          name: 'jwt',
-          hash: '',
-        }),
-        (accessToken) => (accessToken.value = new Secret(jwtToken))
-      )
-    } catch (error) {
-      return null
     }
   }
 }
